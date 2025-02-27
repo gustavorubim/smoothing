@@ -5,14 +5,12 @@ from plotly.subplots import make_subplots
 import pandas_datareader.data as web
 from datetime import datetime
 from statsmodels.nonparametric.smoothers_lowess import lowess
-from scipy.interpolate import BSpline, splrep
 from sklearn.preprocessing import StandardScaler
 
 class SmoothingPipeline:
     def __init__(self):
         self.raw_data = None
         self.processed_data = None
-        self.spline_knots = None
         
     def acquire_data(self):
         """Download and prepare VIX data"""
@@ -49,37 +47,25 @@ class SmoothingPipeline:
         endog = self.raw_data['raw'].values
         exog = np.arange(len(self.raw_data))
         
-        window = max(int(len(self.raw_data) * 0.1), 5)
+        # Calculate gradients to detect rapid changes
+        gradients = np.abs(np.gradient(endog))
+        grad_weights = gradients / np.max(gradients)
+        
+        # Use smaller window for faster response to changes
+        window = max(int(len(self.raw_data) * 0.05), 3)
         rolling_std = pd.Series(endog).rolling(window=window, center=True).std()
         
+        # Combine gradient and volatility information for bandwidth
         bandwidths = rolling_std / rolling_std.max()
         bandwidths = bandwidths.fillna(bandwidths.mean())
-        bandwidths = 0.1 + 0.4 * bandwidths
+        
+        # Adjust bandwidths to be smaller at peaks (high gradient areas)
+        bandwidths = 0.05 + 0.25 * (1 - grad_weights) * bandwidths
         
         smoothed = np.zeros_like(endog)
         for i in range(len(self.raw_data)):
             local_smooth = lowess(endog, exog, frac=bandwidths[i], it=3, delta=0.0, return_sorted=False)
             smoothed[i] = local_smooth[i]
-            
-        return smoothed
-        
-    def calculate_splines(self, n_knots=10, penalized=True):
-        """Calculate B-spline smoothing with optional penalization"""
-        x = np.arange(len(self.raw_data))
-        y = self.raw_data['raw'].values
-        
-        # Calculate knot positions using quantiles
-        knots = np.percentile(x, np.linspace(0, 100, n_knots + 2)[1:-1])
-        self.spline_knots = knots
-        
-        if penalized:
-            # Penalized B-spline (P-spline)
-            spl = splrep(x, y, t=knots, k=3, s=len(y) * 0.1)
-            smoothed = BSpline(*spl)(x)
-        else:
-            # Unpenalized B-spline
-            spl = splrep(x, y, t=knots, k=3, s=0)
-            smoothed = BSpline(*spl)(x)
             
         return smoothed
         
@@ -91,10 +77,6 @@ class SmoothingPipeline:
         
         # Adaptive LOWESS
         self.processed_data['adaptive_lowess'] = self.calculate_adaptive_lowess()
-        
-        # Splines
-        self.processed_data['penalized_spline'] = self.calculate_splines(penalized=True)
-        self.processed_data['unpenalized_spline'] = self.calculate_splines(penalized=False)
         
     def generate_visualization(self):
         """Create interactive Plotly visualization"""
@@ -137,36 +119,6 @@ class SmoothingPipeline:
             line=dict(color='red', width=2)
         ))
         
-        # Splines
-        fig.add_trace(go.Scatter(
-            x=self.processed_data.index,
-            y=self.processed_data['penalized_spline'],
-            mode='lines',
-            name='Penalized Spline',
-            line=dict(color='purple', width=2)
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=self.processed_data.index,
-            y=self.processed_data['unpenalized_spline'],
-            mode='lines',
-            name='Unpenalized Spline',
-            line=dict(color='orange', width=2)
-        ))
-        
-        # Add knot locations
-        knot_dates = [self.processed_data.index[int(k)] for k in self.spline_knots]
-        knot_values = [self.processed_data['raw'].iloc[int(k)] for k in self.spline_knots]
-        
-        fig.add_trace(go.Scatter(
-            x=knot_dates,
-            y=knot_values,
-            mode='markers',
-            name='Spline Knots',
-            marker=dict(symbol='x', size=10, color='black'),
-            showlegend=True
-        ))
-        
         # Update layout
         fig.update_layout(
             title='VIX Index Smoothing Comparison',
@@ -204,10 +156,7 @@ class SmoothingPipeline:
                          args=[{"visible": [True] + [False] * (len(fig.data)-1)}]),
                     dict(label="LOWESS Only",
                          method="update",
-                         args=[{"visible": [True, True, True, True] + [False] * (len(fig.data)-4)}]),
-                    dict(label="Splines Only",
-                         method="update",
-                         args=[{"visible": [True] + [False] * 3 + [True, True, True]}])
+                         args=[{"visible": [True, True, True, True]}])
                 ]),
             )
         ]
